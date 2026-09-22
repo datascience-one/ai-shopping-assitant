@@ -28,7 +28,7 @@ import pandas as pd
 import os
 import requests
 from requests.auth import HTTPBasicAuth
-
+from rapidfuzz import fuzz
 import config
 
 # Path to the product dataset (fallback only)
@@ -243,10 +243,22 @@ def search_products(query: str, max_budget: float = None, category: str = None) 
     if query:
         keywords = query.lower().split()
         search_columns = ["product_name", "brand", "subcategory", "key_specs", "category"]
-
+        FUZZY_MATCH_THRESHOLD = 80  # Minimum similarity score for fuzzy matching
         def row_matches(row):
             combined = " ".join(str(row[col]).lower() for col in search_columns if col in row.index)
-            return any(kw in combined for kw in keywords)
+            #return any(kw in combined for kw in keywords)
+            for kw in keywords:
+                 # Fast path: exact substring match (handles most queries cheaply)
+                if kw in combined:
+                    return True
+                 # Fallback: fuzzy match this keyword against each word in the
+                # product's combined text, so typos like "moisturzer" still
+                # match "moisturizer".
+                for word in combined.split():
+                    if fuzz.ratio(kw, word) >=  FUZZY_MATCH_THRESHOLD:
+                        return True
+            return False
+
 
         df = df[df.apply(row_matches, axis=1)]
 

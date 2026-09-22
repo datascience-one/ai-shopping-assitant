@@ -3,7 +3,7 @@ uvicorn[standard]
 requests
 python-dotenv
 pandas
-
+rapidfuzz
 # LLM SDKs — install only the one you need
 # google-generativeai       # for Gemini
 # openai                    # for OpenAI
