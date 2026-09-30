@@ -89,3 +89,25 @@ def test_search_combined_query_budget_category():
     for r in results:
         assert r["price"] <= 600
         assert r["category"].lower() == "electronics"
+
+# ── Fuzzy matching (TODO 1) ───────────────────────────────────────────────────
+
+def test_search_fuzzy_matches_typo():
+    """A slightly misspelled keyword should still find results, via fuzzy matching."""
+    exact = search_products(query="phone")
+    typo = search_products(query="phne")  # missing the "o"
+    assert len(typo) > 0, "Fuzzy matching should still find results for a close typo"
+    assert len(exact) > 0, "Sanity check: exact query should also return results"
+
+
+def test_search_empty_query_does_not_crash():
+    """An empty query string should not error, and should just skip keyword filtering."""
+    results = search_products(query="")
+    assert isinstance(results, list), "Empty query should still return a list, not crash"
+
+
+def test_search_fuzzy_does_not_match_unrelated_word():
+    """A word with no similarity to any product text should return no results,
+    proving fuzzy matching isn't so loose it matches everything."""
+    results = search_products(query="zzzxxqqjjbbnn")
+    assert results == [], "Completely dissimilar keyword should return no matches"

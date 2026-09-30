@@ -115,6 +115,10 @@ def chat(request: ChatRequest):
 
     # ── Step 1 — Search ───────────────────────────────────────────────────────
     t0 = time.time()
+    extracted_budget = extract_budget(request.message)
+    if extracted_budget is not None and request.max_budget is None:
+        request.max_budget = extracted_budget
+
     search_results = search_products(
         query=request.message,
         max_budget=request.max_budget,
@@ -171,6 +175,25 @@ def chat(request: ChatRequest):
 # ─────────────────────────────────────────────────────────────────────────────
 
 # ─────────────────────────────────────────────────────────────────────────────
+import re
+
+
+def extract_budget(message: str):
+    """Looks for phrases like 'under 20000' or 'budget of 10000' in a message
+    and returns the number as a budget, or None if not found."""
+    message = message.lower()
+    patterns = [
+        r"under\s*(?:rs\.?|₹)?\s*(\d+)",
+        r"below\s*(?:rs\.?|₹)?\s*(\d+)",
+        r"less than\s*(?:rs\.?|₹)?\s*(\d+)",
+        r"within\s*(?:rs\.?|₹)?\s*(\d+)",
+        r"budget\s*(?:of)?\s*(?:rs\.?|₹)?\s*(\d+)",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, message)
+        if match:
+            return float(match.group(1))
+    return None
 # TODO 2: Add intent extraction
 #   - Before calling the Search Agent, add an intent extraction step that
 #     parses the user's message and automatically fills max_budget and category.
