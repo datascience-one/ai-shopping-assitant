@@ -24,6 +24,7 @@ Students:
 
 import sys
 import os
+from data.spec_profiles import get_profile
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 
@@ -167,7 +168,50 @@ def score_product(product: dict, max_budget: float = None) -> float:
     final = (base * 0.60) + (spec * conf_weight * 0.40)
     return round(final, 2)
 
+def _calculate_value_for_money(
+    product: dict,
+    average_price: float
+) -> float:
+    category = str(product.get("category", "")).strip()
+    subcategory = str(product.get("subcategory", "")).strip()
+    profile = get_profile(category, subcategory)
 
+    if not profile and subcategory:
+        profile = get_profile(category, f"{subcategory}s")
+
+    if not profile:
+        return 0.0
+
+    scoring_specs = profile.get("scoring_specs", {})
+    vfm_scores = []
+
+    for spec_name, (_, _, max_value) in scoring_specs.items():
+        spec_value = product.get(f"spec_{spec_name}", 0)
+
+        if not spec_value or spec_value <= 0:
+            continue
+
+        product_price_per_unit = product["price"] / spec_value
+        reference_price_per_unit = average_price / max_value
+
+        if reference_price_per_unit <= 0:
+            continue
+
+        ratio = reference_price_per_unit / product_price_per_unit
+        vfm_score = 10 * ratio / (1 + ratio)
+        vfm_scores.append(vfm_score)
+
+    if not vfm_scores:
+        return 0.0
+
+    vfm_score = sum(vfm_scores) / len(vfm_scores)
+
+    confidence = str(product.get("spec_confidence", "")).lower()
+    confidence_weight = CONFIDENCE_WEIGHT.get(confidence, 0.3)
+
+    final_vfm_score = vfm_score * confidence_weight
+
+    return round(final_vfm_score, 2)
 # ─────────────────────────────────────────────────────────────────────────────
 # Ranking
 # ─────────────────────────────────────────────────────────────────────────────
@@ -205,9 +249,23 @@ def compare_and_rank(
     if not products:
         return []
 
+    valid_prices = [
+        p.get("price",0)
+        for p in products
+        if p.get("price",0)>0
+    ]
+
+    average_price = (
+        sum(valid_prices) / len(valid_prices)
+        if valid_prices
+        else 0
+    )
+
     # Score every product
     for p in products:
         p["score"] = score_product(p, max_budget)
+        vfm_bonus = _calculate_value_for_money(p,average_price)
+        p['score'] = round(p['score'] + vfm_bonus, 2)
 
     # Sort by score descending
     sorted_products = sorted(products, key=lambda x: x["score"], reverse=True)

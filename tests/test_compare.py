@@ -33,6 +33,36 @@ def make_product(store="Store A", price=500, mrp=600, rating=4.2, review_count=1
         "cons": "None",
     }
 
+def make_smartphone(price=20000, storage=512, store="Store A"):
+    return {
+        "product_name": "Test Smartphone",
+        "brand": "Test Brand",
+        "category": "Electronics",
+        "subcategory": "Smartphone",
+        "store": store,
+        "price": price,
+        "mrp": 22000,
+        "rating": 4.2,
+        "review_count": 1000,
+        "stock_status": "in_stock",
+        "spec_storage": storage,
+        "spec_battery": 6000,
+        "spec_ram": 8,
+        "spec_rear_camera": 50,
+        "spec_display_size": 6.5,
+        "spec_confidence": "high",
+    }
+
+def test_value_for_money_better_price_per_spec():
+    better_value = make_smartphone(storage=512)
+    worse_value = make_smartphone(storage=256, store="Store B")
+
+    results = compare_and_rank(
+        [better_value, worse_value],
+        top_n=2
+    )
+
+    assert results[0]["score"] > results[1]["score"]
 
 # ── Scoring ───────────────────────────────────────────────────────────────────
 
