@@ -12,7 +12,7 @@ Run with:
 """
 
 import pytest
-from agents.search import search_products, load_products
+from agents.search import search_products, load_products, expand_query_with_synonyms
 
 
 # ── Dataset loading ───────────────────────────────────────────────────────────
@@ -89,3 +89,49 @@ def test_search_combined_query_budget_category():
     for r in results:
         assert r["price"] <= 600
         assert r["category"].lower() == "electronics"
+
+# ── Synonym expansion (TODO 2) ────────────────────────────────────────────────
+
+def test_expand_query_synonyms_happy_path() -> None:
+    """
+    1. Happy Path Test: Validates that a standard smartphone query expands correctly.
+
+    Verifies single-word lookups append their target synonym list definitions.
+    """
+    query = "budget mobile"
+    result = expand_query_with_synonyms(query)
+
+    # Original terms must still be present
+    assert "budget" in result
+    assert "mobile" in result
+
+    # Synonyms from the active smartphone dictionary must be successfully appended
+    assert "affordable" in result
+    assert "cheap" in result
+    assert "entry-level" in result
+    assert "smartphone" in result
+
+
+def test_expand_query_synonyms_empty_input() -> None:
+    """
+    2. Empty Input Test: Validates that empty strings or None values return cleanly.
+
+    Ensures input guard thresholds return a string to maintain type safety boundaries.
+    """
+    assert expand_query_with_synonyms("") == ""
+    assert expand_query_with_synonyms(None) == ""
+
+
+def test_expand_query_synonyms_edge_case() -> None:
+    """
+    3. Edge Case Test: Evaluates multi-word boundaries and phrase lookup mechanics.
+
+    Ensures that a compound smartphone string trigger like 'basic phone' maps
+    back to its core key ('feature phone') and alternate listings bidirectionally.
+    """
+    query = "buying a basic phone"
+    result = expand_query_with_synonyms(query)
+
+    # Verifies internal space phrase segments expand successfully
+    assert "feature phone" in result
+    assert "keypad phone" in result

@@ -156,7 +156,10 @@ def chat(request: ChatRequest):
     return ChatResponse(
         user_message=request.message,
         recommendation=recommendation,
-        top_products=[ProductResult(**p) for p in top_products],
+        top_products=[
+            ProductResult(**{k: ("" if str(v) == "nan" else v) for k, v in p.items()})
+            for p in top_products
+        ],
     )
 
 

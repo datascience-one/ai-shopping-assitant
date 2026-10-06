@@ -26,6 +26,7 @@ Students:
 
 import pandas as pd
 import os
+import re
 import requests
 from requests.auth import HTTPBasicAuth
 
@@ -209,6 +210,93 @@ def load_products() -> pd.DataFrame:
 
     return df
 
+# ── Synonyms Dictionary (TODO 2) ─────────────────────────────────────────────
+SYNONYMS = {
+    # General terms
+    "budget": ["affordable", "cheap", "entry-level"],
+
+    # Smartphones
+    "mobile": ["phone", "cellphone", "handset", "smartphone"],
+    "feature phone": ["basic phone", "keypad phone"],
+    "redmi": ["xiaomi"],
+    "iqoo": ["vivo"],
+    "iphone": ["apple"],
+    "samsung": ["galaxy"],
+
+    # Laptops
+    "notebook": ["laptop", "ultrabook"],
+    "pc": ["computer"],
+    "macbook": ["apple"],
+
+    # Earphones
+    "earbuds": ["earphones", "headphones", "in-ear"],
+    "wireless": ["bluetooth", "cordless"],
+    "noise cancelling": ["ANC", "noise-cancelling"],
+
+
+    # Skincare / Beauty
+    "moisturiser": ["moisturizer", "hydrating"],
+    "under eye cream": ["eye contour serum", "eye gel"],
+    "sunscreen": ["sunblock", "spf"],
+    "face wash": ["cleanser", "facewash"],
+    "scrub": ["exfoliator", "exfoliating"],
+    "serum": ["essence"],
+    "beauty": ["skincare", "cosmetics", "makeup"]
+}
+
+def _has_phrase(text: str, phrase: str) -> bool:
+    """
+    Checks whether a word or phrase appears in text as whole words.
+
+    Args:
+        text  : Lowercased text to search in.
+        phrase: Word or phrase to look for (case-insensitive).
+
+    Returns:
+        True only if the phrase is not part of a longer word.
+    """
+    return re.search(rf"\b{re.escape(phrase.lower())}\b", text) is not None
+
+
+
+def expand_query_with_synonyms(query: str, category: str | None = None) -> str:
+    """
+    Expands a user query string with matching terms from the global synonyms dictionary.
+
+    Args:
+        query: Free-text search string from the user.
+        category: Optional category filter string (not utilized by this lookup mapping).
+
+    Returns:
+        Expanded query string containing original text and unique added synonyms.
+    """
+    # Guard check for empty input while maintaining strict type boundaries
+    if not query:
+        return ""
+
+    query_lower = query.lower()
+
+    # Split the original query text into structural words
+    expanded_terms = query.split()
+
+    # Store lowercase versions in a set for reliable lookup evaluations
+    seen_terms = {word.lower() for word in expanded_terms}
+
+    # Scan the dictionary records directly to catch multi-word phrases and single words
+    for key, synonyms_list in SYNONYMS.items():
+        key_lower = key.lower()
+
+        # Expand only when the key or one of its synonyms appears as a whole word/phrase
+        if _has_phrase(query_lower, key_lower) or any(
+            _has_phrase(query_lower, s) for s in synonyms_list
+        ):
+            for term in [key] + synonyms_list:
+                if term.lower() not in seen_terms:
+                    expanded_terms.append(term)
+                    seen_terms.add(term.lower())
+
+    return " ".join(expanded_terms)
+
 
 def search_products(query: str, max_budget: float = None, category: str = None) -> list[dict]:
     """
@@ -237,7 +325,9 @@ def search_products(query: str, max_budget: float = None, category: str = None) 
     # ── Budget filter ────────────────────────────────────────────────────────
     if max_budget is not None:
         df = df[df["price"] <= max_budget]
-
+    # ── Synonyms expansion (TODO 2) ──────────────────────────────────────────
+    if query:
+        query = expand_query_with_synonyms(query, category)
     # ── Keyword filter ───────────────────────────────────────────────────────
     # Searches across product name, brand, subcategory, and key_specs
     if query:
