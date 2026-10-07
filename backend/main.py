@@ -133,7 +133,11 @@ def chat(request: ChatRequest):
 
     # ── Step 2 — Compare ──────────────────────────────────────────────────────
     t0 = time.time()
-    top_products = compare_and_rank(search_results, max_budget=request.max_budget)
+    top_products = compare_and_rank(
+        search_results,
+        max_budget=request.max_budget,
+        query=request.message,
+    )
     compare_time = time.time() - t0
 
     logger.info(f"COMPARE  | top={len(top_products)} products | time={compare_time:.3f}s")
