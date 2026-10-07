@@ -52,9 +52,6 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-k = os.getenv("WC_CONSUMER_KEY")
-print(k)
-print(k[-7:])
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Store configuration

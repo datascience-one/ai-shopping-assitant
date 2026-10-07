@@ -25,6 +25,7 @@ Testing note:
   before the LLM integration task is picked up.
 """
 
+from google import genai
 import config
 
 
@@ -152,13 +153,24 @@ def _call_gemini(prompt: str) -> str:
                from google import genai
                client = genai.Client(api_key=config.GEMINI_API_KEY)
                response = client.models.generate_content(
-                   model="gemini-2.0-flash",
+                   model="gemini-3.6-flash",
                    contents=prompt
                )
                return response.text
     """
-    raise NotImplementedError("Gemini integration not yet implemented. See TODO in _call_gemini()")
+    if not config.GEMINI_API_KEY:
+        raise ValueError(
+            "GEMINI_API_KEY is missing. Add it to your .env file."
+        )
 
+    client = genai.Client(api_key=config.GEMINI_API_KEY)
+
+    response = client.models.generate_content(
+        model="gemini-3.6-flash",
+        contents=prompt,
+    )
+
+    return response.text
 
 def _call_openai(prompt: str) -> str:
     """

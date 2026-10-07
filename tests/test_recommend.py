@@ -15,8 +15,7 @@ Run with:
 """
 
 import pytest
-from agents.recommend import build_prompt, get_recommendation
-
+from agents.recommend import build_prompt, get_recommendation, _call_gemini
 
 # ── Sample data ───────────────────────────────────────────────────────────────
 
@@ -77,3 +76,33 @@ def test_get_recommendation_returns_message_for_empty_products():
     result = get_recommendation("serum", [])
     assert isinstance(result, str), "Should return a string"
     assert len(result) > 0, "Should return a non-empty message"
+
+
+
+
+
+
+ #── Gemini integration ────────────────────────────────────────────────────────
+
+
+def test_call_gemini_returns_response_text(monkeypatch):
+    class FakeResponse:
+        text = "This is a Gemini recommendation."
+
+    class FakeModels:
+        def generate_content(self, model, contents):
+            assert model == "gemini-3.6-flash"
+            assert contents == "test prompt"
+            return FakeResponse()
+
+    class FakeClient:
+        def __init__(self, api_key):
+            assert api_key == "fake-key"
+            self.models = FakeModels()
+
+    monkeypatch.setattr("agents.recommend.config.GEMINI_API_KEY", "fake-key")
+    monkeypatch.setattr("agents.recommend.genai.Client", FakeClient)
+
+    result = _call_gemini("test prompt")
+
+    assert result == "This is a Gemini recommendation."

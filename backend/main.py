@@ -22,6 +22,7 @@ Students:
 
 import logging
 import time
+import math
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
@@ -81,6 +82,27 @@ class ChatResponse(BaseModel):
     top_products: list[ProductResult]
 
 
+def normalize_product_text(product: dict) -> dict:
+    """
+    Normalize optional product text fields before API response validation.
+
+    Missing pros and cons values may be loaded from the dataset as NaN.
+    These values are converted to empty strings so ProductResult receives
+    valid string values.
+    """
+    normalized = product.copy()
+
+    for field in ("pros", "cons"):
+        value = normalized.get(field)
+
+        if value is None or (
+            isinstance(value, float) and math.isnan(value)
+        ):
+            normalized[field] = ""
+
+    return normalized
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Endpoints
 # ─────────────────────────────────────────────────────────────────────────────
@@ -107,6 +129,10 @@ def chat(request: ChatRequest):
 
     Returns:
         ChatResponse with LLM recommendation and top product details
+
+    Notes:
+        Missing pros and cons values are normalized to empty strings
+        before ProductResult validation.
     """
 
     pipeline_start = time.time()
@@ -156,9 +182,11 @@ def chat(request: ChatRequest):
     return ChatResponse(
         user_message=request.message,
         recommendation=recommendation,
-        top_products=[ProductResult(**p) for p in top_products],
+        top_products=[
+            ProductResult(**normalize_product_text(p))
+            for p in top_products
+        ],
     )
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # TODO 1: Add conversation memory
