@@ -24,6 +24,9 @@ Students:
 import os
 from typing import Any
 import requests
+import json
+from datetime import datetime
+import pandas as pd
 import streamlit as st
 
 DEFAULT_API_BASE_URL = "http://127.0.0.1:8000"
@@ -332,6 +335,101 @@ def render_product_card(product: dict[str, Any], rank: int) -> None:
         if cons:
             st.markdown(f"**⚠️ Cons:** {cons}")
 
+EXPORT_COLUMNS = [
+    "product_name", "brand", "store", "price", "mrp",
+    "rating", "review_count", "score", "key_specs",
+    "pros", "cons",
+]
+
+
+def _build_export_rows(top_products: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """
+    Flattens the top products into rows for CSV/JSON export.
+
+    Args:
+        top_products: Product dictionaries from the backend response.
+
+    Returns:
+        list[dict]: One row per product, with a rank plus the export columns.
+    """
+    rows = []
+    for rank, prod in enumerate(top_products, start=1):
+        row = {"rank": rank}
+        for col in EXPORT_COLUMNS:
+            if col == "key_specs":
+                specs = prod.get("key_specs") or ""
+                # Replace pipe separators with line breaks
+                row[col] = specs.replace(" | ", "\n")
+            else:
+                row[col] = prod.get(col, "")
+        rows.append(row)
+    return rows
+
+def _build_csv_bytes(rows: list[dict[str, Any]]) -> bytes:
+    """
+    Converts export rows to CSV bytes that Excel opens correctly.
+
+    Args:
+        rows: Rows produced by _build_export_rows().
+
+    Returns:
+        bytes: UTF-8 (with BOM) CSV content, so the ₹ symbol displays properly.
+    """
+    df = pd.DataFrame(rows).rename(
+        columns={"price": "price (₹)", "mrp": "mrp (₹)"}
+    )
+    return df.to_csv(index=False).encode("utf-8-sig")
+
+
+def _build_json_text(recommendation: str, rows: list[dict[str, Any]]) -> str:
+    """
+    Builds a JSON summary containing the recommendation and product rows.
+
+    Args:
+        recommendation: The assistant's recommendation text.
+        rows: Rows produced by _build_export_rows().
+
+    Returns:
+        str: Pretty-printed JSON string.
+    """
+    return json.dumps(
+        {
+            "exported_at": datetime.now().isoformat(timespec="seconds"),
+            "recommendation": recommendation,
+            "products": rows,
+        },
+        indent=2,
+        ensure_ascii=False,
+    )
+
+
+def render_export_buttons(response_data: dict[str, Any]) -> None:
+    """
+    Renders CSV and JSON download buttons for the current results.
+
+    Args:
+        response_data: The backend ChatResponse payload.
+    """
+    top_products = response_data.get("top_products", [])
+    if not top_products:
+        return
+
+    rows = _build_export_rows(top_products)
+    csv_data = _build_csv_bytes(rows)
+    json_data = _build_json_text(response_data.get("recommendation", ""), rows)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    st.markdown("### :blue[:material/upload:] Export Comparison")
+    col1, col2, _ = st.columns([1, 1, 4])
+    with col1:
+        st.download_button(
+            "Download CSV", data=csv_data,
+            file_name=f"comparison_{stamp}.csv", mime="text/csv", icon=":material/description:", key="download_csv",
+        )
+    with col2:
+        st.download_button(
+            "Download JSON", data=json_data,
+            file_name=f"comparison_{stamp}.json", mime="application/json", icon=":material/description:", key="download_json",
+        )
 
 def render_results(response_data: dict[str, Any]) -> None:
     """
@@ -360,6 +458,7 @@ def render_results(response_data: dict[str, Any]) -> None:
         with col:
             render_product_card(prod, rank=idx)
 
+    render_export_buttons(response_data)
 
 def _execute_search(
     base_url: str, query: str, budget: float | None, category: str | None
