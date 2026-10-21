@@ -80,6 +80,43 @@ SPEC_PROFILES = {
         # Category label to apply
         "category": "Electronics",
     },
+        "Electronics/Laptops": {
+
+        "spec_columns": [
+            "ram", "storage", "processor", "display_size",
+            "battery_life_hrs", "weight"
+        ],
+
+        "source_columns": {
+            "ram":              "ram_source",
+            "storage":          "storage_source",
+            "processor":        "processor_source",
+            "display_size":     "display_size_source",
+            "battery_life_hrs": "battery_life_hrs_source",
+            "weight":           "weight_source",
+        },
+
+        "trusted_sources": ["spec_table", "title"],
+
+        "scoring_specs": {
+            "ram":              ("GB",  True,  64),
+            "storage":          ("GB",  True,  2000),
+            "battery_life_hrs": ("hrs", True,  20),
+            "weight":           ("kg",  False, 3),
+        },
+
+        "display_specs": {
+            "RAM":          "ram",
+            "Storage":      "storage",
+            "Processor":    "processor",
+            "Display":      "display_size",
+            "Battery Life": "battery_life_hrs",
+            "Weight":       "weight",
+        },
+
+        "subcategory": "Laptop",
+        "category": "Electronics",
+    },
 
     # ─────────────────────────────────────────────────────────────────────────
     # TODO: Add Laptops profile
