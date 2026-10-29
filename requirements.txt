@@ -5,7 +5,7 @@ python-dotenv
 pandas
 
 # LLM SDKs — install only the one you need
-# google-generativeai       # for Gemini
+google-genai
 # openai                    # for OpenAI
 # anthropic                 # for Anthropic Claude
 

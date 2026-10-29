@@ -31,6 +31,9 @@ import pandas as pd
 import os
 import re
 import sys
+import json
+
+import config
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from data.spec_profiles import SPEC_PROFILES, get_profile
@@ -384,10 +387,19 @@ def process_smartphones(df: pd.DataFrame) -> pd.DataFrame:
         else:
             df[f"spec_{spec_col}"] = 0.0
 
-    # Add default columns
-    df["pros"]         = ""
-    df["cons"]         = ""
-    df["stock_status"] = "in_stock"
+    # Add default columns without overwriting existing values
+    if "pros" not in df.columns:
+        df["pros"] = ""
+    else:
+        df["pros"] = df["pros"].fillna("")
+
+    if "cons" not in df.columns:
+        df["cons"] = ""
+    else:
+        df["cons"] = df["cons"].fillna("")
+
+    if "stock_status" not in df.columns:
+        df["stock_status"] = "in_stock"
 
     # Drop rows missing name or price
     df = df.dropna(subset=["product_name", "price"])
@@ -419,6 +431,466 @@ def deduplicate(df: pd.DataFrame) -> pd.DataFrame:
     )
 
     return df
+
+def _normalise_evidence(text: str) -> str:
+    """Normalize text for comparing evidence with product information."""
+    return " ".join(re.findall(r"[a-z0-9]+", text.casefold()))
+
+
+def _extract_numeric_values(text: str) -> set[str]:
+    """Extract normalized numeric values from text."""
+    values = re.findall(r"(?<!\d)\d[\d,]*(?:\.\d+)?", text)
+    normalized = set()
+
+    for value in values:
+        try:
+            normalized.add(format(float(value.replace(",", "")), ".12g"))
+        except ValueError:
+            continue
+
+    return normalized
+
+
+def _validate_generated_item(
+    item: dict,
+    row: pd.Series,
+) -> list[str]:
+    """Validate generated pros and cons against product information."""
+    errors = []
+
+    if not isinstance(item, dict):
+        return ["The product result must be a JSON object."]
+
+    source_columns = {
+        "product_name",
+        "description",
+        "key_specs",
+        "ram",
+        "storage",
+        "processor",
+        "battery",
+        "display_size",
+        "rear_camera",
+        "front_camera",
+        "os",
+        "ui_skin",
+    }
+
+    source_columns.update(
+        column
+        for column in row.index
+        if column.startswith("spec_")
+    )
+
+    source_texts = []
+
+    for column in source_columns:
+        if column not in row.index:
+            continue
+
+        value = row.get(column, "")
+
+        if pd.notna(value) and str(value).strip():
+            source_texts.append(str(value).strip())
+
+    source_numbers = _extract_numeric_values(" ".join(source_texts))
+
+    for field, minimum, maximum in [
+        ("pros", 2, 3),
+        ("cons", 1, 2),
+    ]:
+        entries = item.get(field)
+
+        if not isinstance(entries, list):
+            errors.append(f"{field} must be a list.")
+            continue
+
+        if not minimum <= len(entries) <= maximum:
+            errors.append(
+                f"{field} must contain {minimum} to {maximum} items."
+            )
+
+        for position, entry in enumerate(entries):
+            label = f"{field}[{position}]"
+
+            if not isinstance(entry, dict):
+                errors.append(
+                    f"{label} must contain a claim and supporting evidence."
+                )
+                continue
+
+            claim = entry.get("claim")
+            evidence = entry.get("evidence")
+
+            if not isinstance(claim, str) or not claim.strip():
+                errors.append(f"{label} has an empty or invalid claim.")
+                continue
+
+            if not isinstance(evidence, str) or not evidence.strip():
+                errors.append(f"{label} has no supporting evidence.")
+                continue
+
+            if re.search(r"\bnan\b", claim, re.IGNORECASE):
+                errors.append(f"{label} contains the forbidden text 'nan'.")
+
+            if re.search(r"\bnan\b", evidence, re.IGNORECASE):
+                errors.append(f"{label} evidence contains the text 'nan'.")
+
+            normalized_evidence = _normalise_evidence(evidence)
+
+            # Check that claim terms are supported by the evidence.
+            stop_words = {
+                "a", "an", "the", "is", "are", "was", "were",
+                "of", "for", "with", "and", "or", "to", "in",
+                "on", "by", "from", "has", "have", "had",
+                "this", "that", "it",
+            }
+
+            def claim_tokens(text: str) -> set[str]:
+                tokens = set(re.findall(r"[a-z0-9]+", text.casefold()))
+
+                # Treat common negative forms as equivalent.
+                if tokens.intersection({"no", "without", "excluded"}):
+                    tokens.difference_update({"no", "without", "excluded"})
+                    tokens.add("not")
+
+                return tokens - stop_words
+
+            unsupported_terms = (
+                claim_tokens(claim) - claim_tokens(evidence)
+            )
+
+            if unsupported_terms:
+                errors.append(
+                    f"{label} contains terms not supported by its evidence: "
+                    f"{', '.join(sorted(unsupported_terms))}."
+                )
+
+            if not any(
+                normalized_evidence in _normalise_evidence(source)
+                for source in source_texts
+            ):
+                errors.append(
+                    f"{label} evidence does not match the product information."
+                )
+
+            claim_numbers = _extract_numeric_values(claim)
+            evidence_numbers = _extract_numeric_values(evidence)
+
+            if not claim_numbers.issubset(source_numbers):
+                errors.append(
+                    f"{label} contains a number not found in the product "
+                    "description or specifications."
+                )
+
+            if not claim_numbers.issubset(evidence_numbers):
+                errors.append(
+                    f"{label} contains a number not supported by its evidence."
+                )
+
+    return errors
+
+def _request_validated_batch(
+    client,
+    products: list[dict],
+    df: pd.DataFrame,
+    max_attempts: int = 3,
+) -> tuple[dict, dict]:
+    """Generate and validate product claims, retrying invalid results."""
+    pending = {
+        str(product["row_id"]): {
+            "product": product,
+            "errors": [],
+        }
+        for product in products
+    }
+    validated = {}
+
+    index_by_row_id = {
+        str(index): index for index in df.index
+    }
+
+    for attempt in range(1, max_attempts + 1):
+        if not pending:
+            break
+
+        current_products = [
+            state["product"]
+            for state in pending.values()
+        ]
+
+        retry_feedback = {
+            row_id: state["errors"]
+            for row_id, state in pending.items()
+            if state["errors"]
+        }
+
+        feedback_text = ""
+        if retry_feedback:
+            feedback_text = (
+                "\nFix these specific validation errors from "
+                "the previous attempt:\n"
+                + json.dumps(retry_feedback, ensure_ascii=False)
+                + "\n"
+            )
+
+        prompt = f"""
+You are a careful product-data assistant.
+
+Generate pros and cons only from the supplied product information.
+Return valid JSON with this structure:
+{{
+  "products": [
+    {{
+      "row_id": "copy the input row_id exactly",
+      "pros": [
+        {{"claim": "concise advantage",
+          "evidence": "exact source excerpt"}}
+      ],
+      "cons": [
+        {{"claim": "realistic limitation",
+          "evidence": "exact source excerpt"}}
+      ]
+    }}
+  ]
+}}
+
+Rules:
+1. Return 2 to 3 pros and 1 to 2 cons per product.
+2. Every evidence value must be an exact excerpt from one
+   supplied source field.
+3. Do not invent product specifications or unsupported claims.
+4. Every number in a claim must match the source information
+   and its supporting evidence.
+5. Never include the text "nan" in a claim or evidence.
+6. Return JSON only, without Markdown fences.
+{feedback_text}
+Products:
+{json.dumps(current_products, ensure_ascii=False)}
+"""
+
+        try:
+            response = client.models.generate_content(
+                model="gemini-2.0-flash",
+                contents=prompt,
+                config={"response_mime_type": "application/json"},
+            )
+
+            result = json.loads(response.text or "{}")
+
+            if not isinstance(result, dict):
+                raise ValueError("Response must be a JSON object.")
+
+            generated = result.get("products")
+
+            if not isinstance(generated, list):
+                raise ValueError(
+                    "JSON response must contain a products list."
+                )
+
+            by_row_id = {
+                str(item["row_id"]): item
+                for item in generated
+                if isinstance(item, dict) and "row_id" in item
+            }
+
+        except Exception as exc:
+            error = (
+                f"Request or JSON parsing failed: "
+                f"{type(exc).__name__}: {exc}"
+            )
+            for state in pending.values():
+                state["errors"] = [error]
+            continue
+
+        for row_id in list(pending):
+            item = by_row_id.get(row_id)
+
+            if item is None:
+                pending[row_id]["errors"] = [
+                    "Response omitted this product row_id."
+                ]
+                continue
+
+            if row_id not in index_by_row_id:
+                pending[row_id]["errors"] = [
+                    "Could not match row_id to the original product."
+                ]
+                continue
+
+            errors = _validate_generated_item(
+                item,
+                df.loc[index_by_row_id[row_id]],
+            )
+
+            if errors:
+                pending[row_id]["errors"] = errors
+                continue
+
+            validated[row_id] = {
+                "item": item,
+                "attempt": attempt,
+            }
+            del pending[row_id]
+
+    return validated, pending
+
+
+def generate_pros_cons(df: pd.DataFrame) -> pd.DataFrame:
+    """Generate pros and cons for products missing them, using Gemini."""
+
+    if "pros_cons_status" not in df.columns:
+        df["pros_cons_status"] = ""
+
+    if "description" not in df.columns:
+        df["pros_cons_status"] = "skipped_missing_description"
+        print("Description column not found; skipping pros/cons generation.")
+        return df
+
+    if "pros" not in df.columns:
+        df["pros"] = ""
+    else:
+        df["pros"] = df["pros"].fillna("")
+
+    if "cons" not in df.columns:
+        df["cons"] = ""
+    else:
+        df["cons"] = df["cons"].fillna("")
+
+    # Select only products that have a description and are missing pros or cons.
+    missing = (
+        df["description"].fillna("").astype(str).str.strip().ne("")
+        & (
+            df["pros"].astype(str).str.strip().eq("")
+            | df["cons"].astype(str).str.strip().eq("")
+        )
+    )
+    indices = df.index[missing].tolist()
+
+    if not indices:
+        print("No products need pros/cons generation.")
+        return df
+
+    if not config.GEMINI_API_KEY:
+        print("Gemini API key is missing; skipping pros/cons generation.")
+        return df
+
+    from google import genai
+
+    client = genai.Client(api_key=config.GEMINI_API_KEY)
+
+    # Process products in small batches to reduce API calls.
+    batch_size = 10
+
+    passed_first_time = 0
+    passed_after_retries = 0
+    flagged_for_review = 0
+
+    specification_columns = [
+        "key_specs",
+        "ram",
+        "storage",
+        "processor",
+        "battery",
+        "display_size",
+        "rear_camera",
+        "front_camera",
+        "os",
+        "ui_skin",
+    ]
+
+    specification_columns.extend(
+        column
+        for column in df.columns
+        if column.startswith("spec_")
+    )
+
+    for start in range(0, len(indices), batch_size):
+        batch_indices = indices[start:start + batch_size]
+        products = []
+
+        index_by_row_id = {
+            str(idx): idx for idx in batch_indices
+        }
+
+        for idx in batch_indices:
+            specifications = {
+                column: str(df.at[idx, column]).strip()
+                for column in specification_columns
+                if column in df.columns
+                and pd.notna(df.at[idx, column])
+                and str(df.at[idx, column]).strip()
+            }
+
+            products.append({
+                "row_id": str(idx),
+                "product_name": str(df.at[idx, "product_name"]),
+                "description": str(df.at[idx, "description"])[:1500],
+                "specifications": specifications,
+            })
+
+        # Request results and validate before accepting any claims.
+        validated, pending = _request_validated_batch(
+            client=client,
+            products=products,
+            df=df,
+            max_attempts=3,
+        )
+
+        # Save only results that passed validation.
+        for row_id, result in validated.items():
+            idx = index_by_row_id[row_id]
+            item = result["item"]
+            attempt = result["attempt"]
+
+            pros = item["pros"]
+            cons = item["cons"]
+
+            # Preserve any existing values.
+            if not str(df.at[idx, "pros"]).strip():
+                df.at[idx, "pros"] = "; ".join(
+                    entry["claim"].strip()
+                    for entry in pros
+                )
+
+            if not str(df.at[idx, "cons"]).strip():
+                df.at[idx, "cons"] = "; ".join(
+                    entry["claim"].strip()
+                    for entry in cons
+                )
+
+            if attempt == 1:
+                df.at[idx, "pros_cons_status"] = (
+                    "generated_first_attempt"
+                )
+                passed_first_time += 1
+            else:
+                df.at[idx, "pros_cons_status"] = (
+                    "generated_after_retry"
+                )
+                passed_after_retries += 1
+
+        # Never save unvalidated generated content.
+        for row_id in pending:
+            idx = index_by_row_id[row_id]
+            df.at[idx, "pros_cons_status"] = "needs_review"
+            flagged_for_review += 1
+
+        print(
+            f"Processed batch {start // batch_size + 1}: "
+            f"{len(validated)} validated, "
+            f"{len(pending)} flagged."
+        )
+
+    print(
+        "Pros/cons generation summary: "
+        f"passed first time={passed_first_time}, "
+        f"passed after retries={passed_after_retries}, "
+        f"flagged for review={flagged_for_review}."
+    )
+
+    return df
+
 
 
 def add_product_ids(df: pd.DataFrame) -> pd.DataFrame:
@@ -459,6 +931,9 @@ def main():
     # ── Deduplicate ───────────────────────────────────────────────────────────
     cleaned = deduplicate(cleaned)
 
+    # ── Generate pros and cons ────────────────────────────────────────────────
+    cleaned = generate_pros_cons(cleaned)
+
     # raw_product_name was only needed for deduplication
     if "raw_product_name" in cleaned.columns:
         cleaned = cleaned.drop(columns=["raw_product_name"])
@@ -470,7 +945,7 @@ def main():
         "product_id", "product_name", "brand", "category", "subcategory",
         "store", "price", "mrp", "rating", "review_count",
         "stock_status", "key_specs", "spec_confidence",
-        "pros", "cons",
+        "pros", "cons", "pros_cons_status",
     ]
     # Add numeric spec columns — exclude spec_confidence since it's
     # already in base_columns (it's a category label, not a numeric spec)
@@ -506,11 +981,6 @@ def main():
     #          final = pd.concat([cleaned, laptop_cleaned])
     # ─────────────────────────────────────────────────────────────────────────
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # TODO 3: Auto-generate pros and cons using LLM
-    #   - The description column has rich product text
-    #   - Use Gemini/OpenAI to extract 2-3 pros and 1-2 cons per product
-    #   - Only do this for products where pros/cons are empty
     # ─────────────────────────────────────────────────────────────────────────
 
 
