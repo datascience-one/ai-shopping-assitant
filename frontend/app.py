@@ -22,7 +22,6 @@ Students:
 """
 
 import os
-import uuid
 from typing import Any
 import requests
 import streamlit as st
@@ -386,6 +385,8 @@ def _execute_search(
                 budget, category,
                 st.session_state.get("session_id"),
             )
+            if result.get("session_id"):
+                st.session_state["session_id"] = result["session_id"]
             st.session_state["last_result"] = result
         except requests.HTTPError as err:
             if err.response is not None and err.response.status_code == 404:
@@ -406,9 +407,6 @@ def main() -> None:
     """Main application entry point."""
     st.set_page_config(page_title="AI Shopping Assistant", page_icon="🛍️", layout="wide")
     inject_custom_css()
-    if "session_id" not in st.session_state:
-        st.session_state["session_id"] = str(uuid.uuid4())
-
     st.markdown('<div class="main-header">🛍️ AI Shopping Assistant</div>', unsafe_allow_html=True)
     st.markdown(
         '<div class="sub-header">Multi-store intelligent smartphone comparison powered by agentic AI</div>',
