@@ -22,9 +22,9 @@ Students:
 
 import logging
 import time
-
+import uuid
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from agents.search import search_products
 from agents.compare import compare_and_rank
@@ -55,10 +55,14 @@ app = FastAPI(
 # Request / Response Models
 # ─────────────────────────────────────────────────────────────────────────────
 
+MAX_SESSION_ID_LENGTH = 64
+
+
 class ChatRequest(BaseModel):
     message: str
     max_budget: float = None      # optional — user can specify budget
     category: str = None          # optional — user can specify category
+    session_id: str | None = Field(default=None, max_length=MAX_SESSION_ID_LENGTH)
 
 
 class ProductResult(BaseModel):
@@ -79,8 +83,63 @@ class ChatResponse(BaseModel):
     user_message: str
     recommendation: str           # natural language response from LLM
     top_products: list[ProductResult]
+    session_id: str | None = None
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Conversation memory
+# In-memory for now. To switch to Redis later, only the bodies of
+# add_to_history() and get_history() need to change.
+# _save_exchange() calls those two, so it stays the same.
+# Sessions never expire here, so the dict grows until the server restarts.
+# Phase 3: Redis with a TTL (time-to-live) removes old sessions automatically.
+# ─────────────────────────────────────────────────────────────────────────────
+
+MAX_HISTORY_MESSAGES = 6
+MAX_MESSAGE_CHARS = 500
+_conversation_history: dict[str, list[dict[str, str]]] = {}
 
 
+def add_to_history(session_id: str, role: str, text: str) -> None:
+    """
+    Saves one message to a session's conversation history.
+
+    Args:
+        session_id: Identifies one chat session.
+        role: Who wrote the message, "user" or "assistant".
+        text: The message text.
+    """
+    history = _conversation_history.setdefault(session_id, [])
+    history.append({"role": role, "text": text[:MAX_MESSAGE_CHARS]})
+    del history[:-MAX_HISTORY_MESSAGES]  # keep only the latest messages
+
+
+def get_history(session_id: str) -> list[dict[str, str]]:
+    """
+    Returns the saved messages for a session, oldest first.
+
+    Args:
+        session_id: Identifies one chat session.
+
+    Returns:
+        list[dict]: Messages with "role" and "text". Empty if the session is new.
+    """
+    return list(_conversation_history.get(session_id, []))
+
+def _save_exchange(session_id: str, message: str, recommendation: str) -> None:
+    """
+    Saves a user message and the assistant reply to the session history.
+
+    Args:
+        session_id: Identifies one chat session.
+        message: The user's message.
+        recommendation: The assistant's reply.
+    """
+    add_to_history(session_id, "user", message)
+    add_to_history(session_id, "assistant", recommendation)
+    logger.info(
+        f"MEMORY   | session={session_id} "
+        f"| messages={len(get_history(session_id))}"
+    )
 # ─────────────────────────────────────────────────────────────────────────────
 # Endpoints
 # ─────────────────────────────────────────────────────────────────────────────
@@ -103,10 +162,10 @@ def chat(request: ChatRequest):
         3. Recommend Agent — sends top 3 to LLM, returns natural language reply
 
     Args:
-        request: ChatRequest with user message, optional budget and category
+        request: ChatRequest with user message, optional budget, category and session_id
 
     Returns:
-        ChatResponse with LLM recommendation and top product details
+        ChatResponse with LLM recommendation, top product details and session_id
     """
 
     pipeline_start = time.time()
@@ -144,19 +203,22 @@ def chat(request: ChatRequest):
         )
 
     # ── Step 3 — Recommend ────────────────────────────────────────────────────
+    session_id = request.session_id or str(uuid.uuid4())
+    history = get_history(session_id)
     t0 = time.time()
-    recommendation = get_recommendation(request.message, top_products)
+    recommendation = get_recommendation(request.message, top_products, history)
     llm_time = time.time() - t0
 
     total_time = time.time() - pipeline_start
 
     logger.info(f"LLM      | time={llm_time:.3f}s")
     logger.info(f"COMPLETE | total_time={total_time:.3f}s")
-
+    _save_exchange(session_id, request.message, recommendation)
     return ChatResponse(
         user_message=request.message,
         recommendation=recommendation,
         top_products=[ProductResult(**p) for p in top_products],
+        session_id=session_id,
     )
 
 
