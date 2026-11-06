@@ -22,14 +22,18 @@ Students:
 """
 
 import html
+import logging
 import math
 import os
+import re
 from typing import Any
+
 import requests
 import plotly.graph_objects as go
 import streamlit as st
 
 DEFAULT_API_BASE_URL = "http://127.0.0.1:8000"
+logger = logging.getLogger(__name__)
 
 
 def inject_custom_css() -> None:
@@ -346,7 +350,14 @@ def _parse_product_specs(product: dict[str, Any]) -> dict[str, float | str | Non
         "spec_rear_camera": None,
         "spec_display_size": None,
         "processor": None,
+        "charging_speed": None,
     }
+
+    for field in ("charging_speed", "charging_speed_w", "charging_wattage"):
+        charging_speed = _extract_wattage(product.get(field), numeric_field=True)
+        if charging_speed is not None:
+            specs["charging_speed"] = charging_speed
+            break
 
     for item in key_specs.split("|"):
         item = item.strip()
@@ -385,6 +396,11 @@ def _parse_product_specs(product: dict[str, Any]) -> dict[str, float | str | Non
             elif label == "processor":
                 specs["processor"] = value
 
+            elif "charg" in label:
+                charging_speed = _extract_wattage(value)
+                if charging_speed is not None:
+                    specs["charging_speed"] = charging_speed
+
         except ValueError:
             continue
 
@@ -398,6 +414,422 @@ def _comparison_number(value: Any) -> float | None:
     except (TypeError, ValueError):
         return None
     return number if math.isfinite(number) else None
+
+
+def _extract_wattage(value: Any, numeric_field: bool = False) -> float | None:
+    """Extract a positive wattage only from explicit charging data."""
+    if numeric_field:
+        numeric_value = _comparison_number(value)
+        if numeric_value is not None and numeric_value > 0:
+            return numeric_value
+    match = re.search(r"\b(\d+(?:\.\d+)?)\s*(?:w|watts?)\b", str(value or ""), re.I)
+    if not match:
+        return None
+    wattage = _comparison_number(match.group(1))
+    return wattage if wattage is not None and wattage > 0 else None
+
+
+def _charging_speed_available(product: dict[str, Any]) -> bool:
+    """Return whether a product includes explicit charging-speed information."""
+    for field in ("charging_speed", "charging_speed_w", "charging_wattage"):
+        if _extract_wattage(product.get(field), numeric_field=True) is not None:
+            return True
+
+    for item in str(product.get("key_specs") or "").split("|"):
+        if ":" not in item:
+            continue
+        label, value = (part.strip().lower() for part in item.split(":", 1))
+        if "charg" in label and _extract_wattage(value) is not None:
+            return True
+    return False
+
+
+def _spec_value_available(value: Any) -> bool:
+    """Return whether a parsed numeric or text specification is meaningful."""
+    number = _comparison_number(value)
+    if number is not None:
+        return number > 0
+    if isinstance(value, str):
+        return value.strip().lower() not in {
+            "",
+            "-",
+            "n/a",
+            "na",
+            "none",
+            "unknown",
+            "not available",
+            "not specified",
+        }
+    return False
+
+
+def _specification_coverage(
+    products: list[dict[str, Any]],
+) -> dict[str, int]:
+    """Count products with usable values for each comparable specification."""
+    valid_products = [product for product in products if isinstance(product, dict)]
+    parsed = [_parse_product_specs(product) for product in valid_products]
+    return {
+        "camera": sum(
+            _spec_value_available(specs["spec_rear_camera"]) for specs in parsed
+        ),
+        "battery": sum(
+            _spec_value_available(specs["spec_battery"]) for specs in parsed
+        ),
+        "ram_storage": sum(
+            _spec_value_available(specs["spec_ram"])
+            and _spec_value_available(specs["spec_storage"])
+            for specs in parsed
+        ),
+        "processor": sum(
+            _spec_value_available(specs["processor"])
+            for specs in parsed
+        ),
+        "charging_speed": sum(
+            _charging_speed_available(product) for product in valid_products
+        ),
+    }
+
+
+def _extract_budget_from_query(query: str) -> float | None:
+    """Extract an explicit under/below budget from the user's query."""
+    match = re.search(
+        r"\b(?:under|below|less than)\s*(?:₹|rs\.?\s*)?"
+        r"([\d,]+(?:\.\d+)?)\s*(k)?\b",
+        query,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return None
+    amount = _comparison_number(match.group(1).replace(",", ""))
+    if amount is None:
+        return None
+    return amount * 1000 if match.group(2) else amount
+
+
+def _cheaper_alternative_threshold(
+    products: list[dict[str, Any]],
+    original_query: str,
+    original_budget: float | None,
+) -> int | None:
+    """Derive a lower request budget from returned prices and the prior budget."""
+    prices = sorted(
+        price
+        for product in products
+        if isinstance(product, dict)
+        if (price := _comparison_number(product.get("price"))) is not None and price > 0
+    )
+    if len(set(prices)) < 2:
+        return None
+
+    middle = len(prices) // 2
+    median_price = (
+        prices[middle]
+        if len(prices) % 2
+        else (prices[middle - 1] + prices[middle]) / 2
+    )
+    budget = _comparison_number(original_budget)
+    if budget is None or budget <= 0:
+        budget = _extract_budget_from_query(original_query)
+    threshold = math.floor(min(median_price, budget)) if budget else math.floor(median_price)
+    if budget is not None and threshold >= budget:
+        threshold = math.floor(budget) - 1
+    if threshold <= 0:
+        return None
+    if not any(price < threshold for price in prices):
+        return None
+    if not any(price >= threshold for price in prices):
+        return None
+    return threshold
+
+
+def _suggestion_label(kind: str, threshold: str | None = None) -> str | None:
+    """Return the user-facing label for a supported suggestion type."""
+    labels = {
+        "camera": "Compare rear camera details",
+        "charging_speed": "Compare charging speeds",
+        "battery": "Compare battery capacities",
+        "ram_storage": "Compare RAM and storage",
+        "processor": "Compare processor details",
+    }
+    if not isinstance(kind, str):
+        return None
+    if kind == "cheaper":
+        amount = _comparison_number(threshold)
+        if amount is not None and amount > 0:
+            return f"Show alternatives at or below ₹{int(amount):,}"
+    return labels.get(kind)
+
+
+def _validate_follow_up_suggestions(
+    suggestions: list[dict[str, str]],
+    products: list[dict[str, Any]],
+    original_query: str = "",
+    original_budget: float | None = None,
+) -> list[dict[str, str]]:
+    """Keep distinct suggestions only when returned products support them."""
+    coverage = _specification_coverage(products)
+    valid: list[dict[str, str]] = []
+    seen: set[str] = set()
+    threshold = _cheaper_alternative_threshold(products, original_query, original_budget)
+    for suggestion in suggestions:
+        if not isinstance(suggestion, dict):
+            logger.warning("Omitting malformed follow-up suggestion.")
+            continue
+        kind = suggestion.get("kind", "")
+        if not isinstance(kind, str):
+            logger.warning("Omitting follow-up suggestion with an invalid action.")
+            continue
+        candidate_threshold = suggestion.get("threshold")
+        expected_label = _suggestion_label(kind, candidate_threshold)
+        supported = (
+            kind == "cheaper"
+            and expected_label is not None
+            and threshold is not None
+            and _comparison_number(candidate_threshold) == threshold
+        )
+        if kind in coverage:
+            supported = coverage[kind] >= 2 and expected_label is not None
+        if not supported or suggestion.get("label") != expected_label:
+            logger.warning("Omitting unsupported or invalid follow-up suggestion: %s", kind)
+            continue
+        if kind in seen:
+            logger.info("Omitting duplicate follow-up suggestion: %s", kind)
+            continue
+        valid.append(suggestion)
+        seen.add(kind)
+    return valid
+
+
+def _build_follow_up_candidates(
+    products: list[dict[str, Any]],
+    coverage: dict[str, int],
+    original_query: str,
+    original_budget: float | None,
+) -> list[dict[str, str]]:
+    """Create candidate actions from specification coverage and price data."""
+    candidates: list[dict[str, str]] = []
+    for kind in ("camera", "charging_speed", "battery", "processor", "ram_storage"):
+        if coverage[kind] >= 2:
+            label = _suggestion_label(kind)
+            if label:
+                candidates.append({"kind": kind, "label": label})
+        else:
+            logger.debug(
+                "Excluding %s follow-up: available for fewer than two products.",
+                kind,
+            )
+
+    threshold = _cheaper_alternative_threshold(products, original_query, original_budget)
+    if threshold is not None:
+        label = _suggestion_label("cheaper", str(threshold))
+        if label:
+            candidates.insert(1, {
+                "kind": "cheaper",
+                "label": label,
+                "threshold": str(threshold),
+            })
+    else:
+        logger.debug("Excluding cheaper-alternatives follow-up: no supported cutoff.")
+    return candidates
+
+
+def _generate_follow_up_suggestions(
+    products: list[dict[str, Any]],
+    original_query: str = "",
+    original_budget: float | None = None,
+) -> list[dict[str, str]]:
+    """Select up to four follow-ups grounded in returned product data."""
+    valid_products = [product for product in products if isinstance(product, dict)]
+    if not valid_products:
+        logger.info("No follow-up suggestions: the search returned no products.")
+        return []
+    if len(valid_products) != len(products):
+        logger.warning("Ignoring malformed product results while generating follow-ups.")
+
+    coverage = _specification_coverage(valid_products)
+    prices = [
+        _comparison_number(product.get("price"))
+        for product in valid_products
+        if _comparison_number(product.get("price")) is not None
+    ]
+    logger.info(
+        "Follow-up evidence: products=%d, prices=%d, specification_coverage=%s",
+        len(valid_products),
+        len(prices),
+        coverage,
+    )
+    candidates = _build_follow_up_candidates(
+        valid_products, coverage, original_query, original_budget
+    )
+    validated = _validate_follow_up_suggestions(
+        candidates, valid_products, original_query, original_budget
+    )
+    selected = validated[:4]
+    logger.info(
+        "Selected follow-up suggestions: %s",
+        [suggestion["label"] for suggestion in selected],
+    )
+    return selected
+
+
+def _build_follow_up_query(previous_query: str, suggestion: dict[str, str]) -> str:
+    """Return the unchanged original query for the cheaper-results request."""
+    if suggestion.get("kind") != "cheaper":
+        return ""
+    return previous_query.strip()
+
+
+def _select_local_comparison(
+    suggestion: dict[str, str], search_context: dict[str, Any]
+) -> None:
+    """Select a supported local comparison without calling the backend."""
+    allowed_kinds = {"camera", "charging_speed", "battery", "ram_storage", "processor"}
+    kind = suggestion.get("kind") if isinstance(suggestion, dict) else None
+    if kind not in allowed_kinds:
+        logger.warning("Ignoring unsupported local follow-up action.")
+        return
+    if not isinstance(search_context, dict) or not search_context.get("query"):
+        logger.warning("Ignoring local follow-up because search context is missing.")
+        return
+    st.session_state["active_follow_up_comparison"] = kind
+
+
+def _queue_cheaper_search(
+    suggestion: dict[str, str], search_context: dict[str, Any]
+) -> None:
+    """Queue a cheaper search using the original query and category."""
+    if not isinstance(suggestion, dict) or not isinstance(search_context, dict):
+        logger.warning("Ignoring malformed follow-up click.")
+        return
+    previous_query = str(search_context.get("query") or "").strip()
+    if not previous_query:
+        logger.warning("Ignoring follow-up click because search context is missing.")
+        return
+
+    query = _build_follow_up_query(previous_query, suggestion)
+    threshold = _comparison_number(suggestion.get("threshold"))
+    if not query or threshold is None or threshold <= 0:
+        logger.warning("Ignoring cheaper follow-up because its request is invalid.")
+        return
+    original_budget = _comparison_number(search_context.get("budget"))
+    if original_budget is not None and threshold >= original_budget:
+        logger.warning("Ignoring cheaper follow-up that does not lower the original budget.")
+        return
+    st.session_state["pending_follow_up"] = {
+        "query": query,
+        "budget": min(threshold, original_budget)
+        if original_budget is not None
+        else threshold,
+        "category": search_context.get("category"),
+    }
+
+
+def _render_local_comparison(
+    products: list[dict[str, Any]], kind: str | None
+) -> None:
+    """Render a focused comparison using only the currently returned products."""
+    label, rows = _build_local_comparison_rows(products, kind)
+    if len(rows) >= 2:
+        st.markdown(f"#### {label} comparison")
+        st.table(rows)
+
+
+def _build_local_comparison_rows(
+    products: list[dict[str, Any]], kind: str | None
+) -> tuple[str, list[dict[str, str]]]:
+    """Build focused rows from available product specs for one follow-up action."""
+    spec_labels = {
+        "camera": ("Rear Camera", "spec_rear_camera", "MP"),
+        "charging_speed": ("Charging Speed", "charging_speed", "W"),
+        "battery": ("Battery Capacity", "spec_battery", "mAh"),
+        "processor": ("Processor", "processor", ""),
+    }
+    if kind == "ram_storage":
+        label = "RAM / Storage"
+        keys = ("spec_ram", "spec_storage")
+    elif kind in spec_labels:
+        label, key, unit = spec_labels[kind]
+        keys = (key,)
+    else:
+        return "", []
+
+    parsed_products = [
+        (product, _parse_product_specs(product))
+        for product in products
+        if isinstance(product, dict)
+    ]
+    coverage = _specification_coverage([product for product, _ in parsed_products])
+    required_coverage = (
+        coverage["ram_storage"] if kind == "ram_storage" else coverage.get(kind, 0)
+    )
+    if required_coverage < 2:
+        logger.info("Skipping local %s comparison: insufficient product data.", kind)
+        return label, []
+
+    rows = []
+    for product, specs in parsed_products:
+        values = [specs.get(key) for key in keys]
+        if not all(_spec_value_available(value) for value in values):
+            continue
+        if kind == "ram_storage":
+            value_text = f"{values[0]:g} GB / {values[1]:g} GB"
+        elif kind == "processor":
+            value_text = str(values[0])
+        else:
+            value_text = f"{values[0]:g} {unit}"
+        rows.append({
+            "Product": str(product.get("product_name") or "Product"),
+            label: value_text,
+            "Price": f"₹{_comparison_number(product.get('price')):,.0f}"
+            if _comparison_number(product.get("price")) is not None
+            else "N/A",
+        })
+
+    return label, rows
+
+
+def render_follow_up_suggestions(
+    response_data: dict[str, Any],
+    search_context: dict[str, Any] | None = None,
+) -> None:
+    """Render validated follow-up buttons below the assistant response."""
+    products = response_data.get("top_products", [])
+    if not isinstance(products, list):
+        logger.warning("Omitting follow-up suggestions: product results are invalid.")
+        return
+    context = search_context or {}
+    query = str(context.get("query") or response_data.get("user_message") or "").strip()
+    if not query:
+        logger.warning("Omitting follow-up suggestions: original search context is missing.")
+        return
+
+    suggestions = _generate_follow_up_suggestions(
+        products, query, _comparison_number(context.get("budget"))
+    )
+    if not suggestions:
+        return
+
+    st.markdown("**You might also try:**")
+    columns = st.columns(min(len(suggestions), 4))
+    for index, (column, suggestion) in enumerate(zip(columns, suggestions)):
+        callback = (
+            _queue_cheaper_search
+            if suggestion["kind"] == "cheaper"
+            else _select_local_comparison
+        )
+        with column:
+            st.button(
+                suggestion["label"],
+                key=f"follow_up_{index}_{suggestion['kind']}",
+                on_click=callback,
+                args=(suggestion, context),
+                width="stretch",
+            )
+    _render_local_comparison(
+        products,
+        st.session_state.get("active_follow_up_comparison"),
+    )
 
 
 def _build_comparison_rows(
@@ -635,7 +1067,10 @@ def render_spec_radar_chart(top_products: list[dict[str, Any]]) -> None:
     st.plotly_chart(fig, use_container_width=True)
 
 
-def render_results(response_data: dict[str, Any]) -> None:
+def render_results(
+    response_data: dict[str, Any],
+    search_context: dict[str, Any] | None = None,
+) -> None:
     """
     Renders the recommendation box and top product cards grid.
 
@@ -652,6 +1087,8 @@ def render_results(response_data: dict[str, Any]) -> None:
             unsafe_allow_html=True,
         )
 
+    render_follow_up_suggestions(response_data, search_context)
+
     st.markdown("### 🏆 Top Ranked Products")
     if not top_products:
         st.info("No product cards returned.")
@@ -667,7 +1104,10 @@ def render_results(response_data: dict[str, Any]) -> None:
 
 
 def _execute_search(
-    base_url: str, query: str, budget: float | None, category: str | None
+    base_url: str,
+    query: str,
+    budget: float | None,
+    category: str | None,
 ) -> None:
     """
     Executes search query against backend API with spinner and error handling.
@@ -678,10 +1118,20 @@ def _execute_search(
         budget: Maximum budget filter value.
         category: Category filter value.
     """
+    st.session_state.pop("last_result", None)
+    st.session_state.pop("last_search_context", None)
+    st.session_state["active_follow_up_comparison"] = None
+
     with st.spinner("Searching stores, scoring specs, and generating recommendations..."):
         try:
             result = query_chat_api(base_url, query.strip(), budget, category)
             st.session_state["last_result"] = result
+            st.session_state["active_follow_up_comparison"] = None
+            st.session_state["last_search_context"] = {
+                "query": query.strip(),
+                "budget": budget,
+                "category": category,
+            }
         except requests.HTTPError as err:
             if err.response is not None and err.response.status_code == 404:
                 detail = err.response.json().get("detail", "No products found.")
@@ -724,14 +1174,25 @@ def main() -> None:
         )
         submitted = st.form_submit_button("Search & Compare", use_container_width=False)
 
+    pending_follow_up = st.session_state.pop("pending_follow_up", None)
     active_query = bot_prompt or example_query or (user_query if submitted else None)
-    if active_query and active_query.strip():
+    if pending_follow_up:
+        _execute_search(
+            DEFAULT_API_BASE_URL,
+            pending_follow_up["query"],
+            pending_follow_up["budget"],
+            pending_follow_up["category"],
+        )
+    elif active_query and active_query.strip():
         _execute_search(DEFAULT_API_BASE_URL, active_query.strip(), max_budget, category)
     elif submitted and not user_query.strip():
         st.warning("Please enter a search query.")
 
     if st.session_state.get("last_result"):
-        render_results(st.session_state["last_result"])
+        render_results(
+            st.session_state["last_result"],
+            st.session_state.get("last_search_context"),
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -783,10 +1244,8 @@ def main() -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 # ─────────────────────────────────────────────────────────────────────────────
-# TODO 7: Dynamic Follow-Up Quick Reply Chips
-#   - Below each assistant response, dynamically generate 3-4 clickable follow-up
-#     chips based on the returned phones (e.g., "Compare camera details",
-#     "Show cheaper alternatives under 18000", "Check battery charging speeds").
+# Implemented above: dynamic follow-up quick reply chips are generated from
+# returned product specifications and prices in `render_follow_up_suggestions()`.
 # ─────────────────────────────────────────────────────────────────────────────
 
 # ─────────────────────────────────────────────────────────────────────────────
