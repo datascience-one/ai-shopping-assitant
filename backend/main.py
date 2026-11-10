@@ -58,6 +58,7 @@ app = FastAPI(
 class ChatRequest(BaseModel):
     message: str
     max_budget: float = None      # optional — user can specify budget
+    stores: list[str] | None = None # optional — only search these stores
     category: str = None          # optional — user can specify category
 
 
@@ -103,7 +104,7 @@ def chat(request: ChatRequest):
         3. Recommend Agent — sends top 3 to LLM, returns natural language reply
 
     Args:
-        request: ChatRequest with user message, optional budget and category
+        request: ChatRequest with user message, optional budget, stores and category
 
     Returns:
         ChatResponse with LLM recommendation and top product details
@@ -123,6 +124,11 @@ def chat(request: ChatRequest):
     search_time = time.time() - t0
 
     logger.info(f"SEARCH   | found={len(search_results)} products | time={search_time:.3f}s")
+    if request.stores:
+        search_results = [p for p in search_results if p.get("store") in request.stores]
+        logger.info(
+            f"FILTER   | stores={request.stores} | kept={len(search_results)} products"
+        )
 
     if not search_results:
         logger.warning(f"SEARCH   | no results for query='{request.message}'")
