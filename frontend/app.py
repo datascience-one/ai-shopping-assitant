@@ -27,6 +27,8 @@ import requests
 import streamlit as st
 
 DEFAULT_API_BASE_URL = "http://127.0.0.1:8000"
+# Store names as they appear in the product data
+STORE_OPTIONS = ["Store A", "Store B", "Store C"]
 
 
 def inject_custom_css() -> None:
@@ -190,6 +192,7 @@ def query_chat_api(
     message: str,
     max_budget: float | None = None,
     category: str | None = None,
+    stores: list[str] | None = None,
 ) -> dict[str, Any]:
     """
     Calls the POST /chat endpoint on the backend pipeline.
@@ -199,6 +202,7 @@ def query_chat_api(
         message: The user's query text (e.g. "Best phone under 20000").
         max_budget: Optional budget limit in INR.
         category: Optional product category filter.
+        stores: Optional store names to search. None or empty means all stores.
 
     Returns:
         dict: The response payload containing recommendation and top_products.
@@ -212,6 +216,8 @@ def query_chat_api(
         payload["max_budget"] = max_budget
     if category and category.strip():
         payload["category"] = category.strip()
+    if stores:
+        payload["stores"] = stores
 
     response = requests.post(f"{base_url}/chat", json=payload, timeout=30.0)
     response.raise_for_status()
@@ -266,6 +272,11 @@ def render_sidebar(base_url: str) -> tuple[float | None, str | None, str | None]
         )
 
     category = st.sidebar.text_input("Category Filter", value="").strip() or None
+    st.sidebar.multiselect(
+        "Stores (leave empty for all)",
+        STORE_OPTIONS,
+        key="selected_stores",
+    )
     example_query = _render_example_queries()
     return max_budget, category, example_query
 
@@ -375,7 +386,7 @@ def _execute_search(
     """
     with st.spinner("Searching stores, scoring specs, and generating recommendations..."):
         try:
-            result = query_chat_api(base_url, query.strip(), budget, category)
+            result = query_chat_api(base_url, query.strip(), budget, category, stores=st.session_state.get("selected_stores"))
             st.session_state["last_result"] = result
         except requests.HTTPError as err:
             if err.response is not None and err.response.status_code == 404:
