@@ -50,3 +50,8 @@ ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 # App
 # ─────────────────────────────────────────────
 APP_ENV = os.getenv("APP_ENV", "development")
+# ─────────────────────────────────────────────
+# LangSmith Observability
+# ─────────────────────────────────────────────
+LANGSMITH_TRACING = os.getenv("LANGSMITH_TRACING", "false").lower() == "true"
+LANGSMITH_API_KEY = os.getenv("LANGSMITH_API_KEY")

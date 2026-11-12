@@ -25,6 +25,7 @@ import time
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
+from langsmith import traceable
 
 from agents.search import search_products
 from agents.compare import compare_and_rank
@@ -93,6 +94,7 @@ def health_check():
 
 
 @app.post("/chat", response_model=ChatResponse)
+@traceable(name="chat_pipeline", run_type="chain")
 def chat(request: ChatRequest):
     """
     Main chat endpoint — runs the full agent pipeline.

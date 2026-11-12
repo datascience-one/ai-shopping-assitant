@@ -30,6 +30,7 @@ import requests
 from requests.auth import HTTPBasicAuth
 
 import config
+from langsmith import traceable
 
 # Path to the product dataset (fallback only)
 DATA_PATH = os.path.join(os.path.dirname(__file__), "../data/products.csv")
@@ -209,7 +210,7 @@ def load_products() -> pd.DataFrame:
 
     return df
 
-
+@traceable(name="search_agent", run_type="tool")
 def search_products(query: str, max_budget: float = None, category: str = None) -> list[dict]:
     """
     Filters products based on a search query, optional budget, and optional category.

@@ -15,3 +15,6 @@ httpx
 
 # Frontend UI (optional)
 streamlit
+
+# Observability
+langsmith

@@ -26,6 +26,7 @@ Testing note:
 """
 
 import config
+from langsmith import traceable
 
 
 def build_prompt(user_query: str, top_products: list[dict]) -> str:
@@ -96,7 +97,7 @@ def _build_fallback_response(provider: str, top_products: list[dict]) -> str:
         f"{product_summary}"
     )
 
-
+@traceable(name="recommend_agent", run_type="tool")
 def get_recommendation(user_query: str, top_products: list[dict]) -> str:
     """
     Sends the top products to the configured LLM and returns a recommendation.

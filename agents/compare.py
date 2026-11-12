@@ -24,6 +24,7 @@ Students:
 
 import sys
 import os
+from langsmith import traceable
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 
@@ -172,6 +173,7 @@ def score_product(product: dict, max_budget: float = None) -> float:
 # Ranking
 # ─────────────────────────────────────────────────────────────────────────────
 
+@traceable(name="compare_agent", run_type="tool")
 def compare_and_rank(
     products: list[dict],
     max_budget: float = None,
